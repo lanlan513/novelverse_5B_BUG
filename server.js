@@ -36,6 +36,15 @@ async function readStore() {
 }
 let writeQueue = Promise.resolve()
 async function writeStore(store) { writeQueue = writeQueue.then(async () => { await fs.mkdir(dataDir, { recursive: true }); await fs.writeFile(dataFile, JSON.stringify(store, null, 2)) }); return writeQueue }
+// 串行化“读-校验-改-写”的完整过程：writeQueue 只保证文件写入不交错，
+// 但两个并发请求仍可能读到同一份旧数据、都通过版本检查后互相覆盖（丢改动）。
+// 所有带乐观锁校验或先查后改的写操作都必须走这把锁。
+let mutationQueue = Promise.resolve()
+function withMutationLock(task) {
+  const run = mutationQueue.then(() => task())
+  mutationQueue = run.catch(() => {})
+  return run
+}
 function requireUser(req, res) { const id = req.header('x-user-id') || req.query.userId; if (!id) { res.status(401).json({ error: 'UNAUTHENTICATED', message: '请先登录 Novelverse' }); return null } return id }
 function now() { return new Date().toISOString() }
 
@@ -216,9 +225,12 @@ app.patch('/api/projects/:id', async (req, res) => {
 })
 app.get('/api/projects/:id/draft', async (req, res) => { const userId = requireUser(req, res); if (!userId) return; const store = await readStore(); const project = store.projects.find(p => p.id === req.params.id && p.ownerId === userId); if (!project) return res.status(404).json({ error: 'NOT_FOUND', message: '草稿不存在' }); res.json({ draft: project.draft }) })
 app.put('/api/projects/:id/draft', async (req, res) => {
-  const userId = requireUser(req, res); if (!userId) return; const store = await readStore(); const project = store.projects.find(p => p.id === req.params.id && p.ownerId === userId); if (!project) return res.status(404).json({ error: 'NOT_FOUND', message: '项目不存在' })
-  const { content = '', baseVersion = 0 } = req.body || {}; if (Number(baseVersion) !== Number(project.draft.version)) return res.status(409).json({ error: 'DRAFT_CONFLICT', message: '这份草稿在另一台设备上有更新', serverDraft: project.draft })
-  const draft = { ...project.draft, content: String(content), version: Number(project.draft.version) + 1, updatedAt: now() }; project.draft = draft; project.updatedAt = draft.updatedAt; await writeStore(store); res.json({ draft })
+  const userId = requireUser(req, res); if (!userId) return
+  await withMutationLock(async () => {
+    const store = await readStore(); const project = store.projects.find(p => p.id === req.params.id && p.ownerId === userId); if (!project) return res.status(404).json({ error: 'NOT_FOUND', message: '项目不存在' })
+    const { content = '', baseVersion = 0 } = req.body || {}; if (Number(baseVersion) !== Number(project.draft.version)) return res.status(409).json({ error: 'DRAFT_CONFLICT', message: '这份草稿在另一台设备上有更新', serverDraft: project.draft })
+    const draft = { ...project.draft, content: String(content), version: Number(project.draft.version) + 1, updatedAt: now() }; project.draft = draft; project.updatedAt = draft.updatedAt; await writeStore(store); res.json({ draft })
+  })
 })
 app.post('/api/projects/:id/share', async (req, res) => { const userId = requireUser(req, res); if (!userId) return; const store = await readStore(); const project = store.projects.find(p => p.id === req.params.id && p.ownerId === userId); if (!project) return res.status(404).json({ error: 'NOT_FOUND', message: '项目不存在' }); project.visibility = project.visibility === 'shared' ? 'private' : 'shared'; project.sharedStatus = project.visibility; project.updatedAt = now(); await writeStore(store); res.json({ project }) })
 
@@ -235,45 +247,50 @@ app.get('/api/projects/:id/branch', async (req, res) => {
 
 app.put('/api/projects/:id/branch', async (req, res) => {
   const userId = requireUser(req, res); if (!userId) return
-  const found = await findProject(req, res); if (!found) return
-  const { store, project } = found; const branch = ensureBranch(project)
-  const { graph, baseVersion = 0 } = req.body || {}
-  if (Number(baseVersion) !== Number(branch.draft.version)) return res.status(409).json({ error: 'BRANCH_CONFLICT', message: '分支草稿在另一处被修改过', serverDraft: branch.draft })
-  const clean = sanitizeGraph(graph)
-  const draft = { ...clean, version: Number(branch.draft.version) + 1, updatedAt: now() }
-  branch.draft = draft; project.updatedAt = draft.updatedAt
-  // 保存草稿时把线上版本同步到最新内容，避免读者读到过期版本
-  const liveVersion = branch.versions.find(v => v.status === 'live')
-  if (liveVersion) liveVersion.snapshot = structuredClone({ startNodeId: draft.startNodeId, nodes: draft.nodes })
-  await writeStore(store)
-  res.json({ draft, versions: branch.versions, validation: validateGraph(draft) })
+  await withMutationLock(async () => {
+    const found = await findProject(req, res); if (!found) return
+    const { store, project } = found; const branch = ensureBranch(project)
+    const { graph, baseVersion = 0 } = req.body || {}
+    if (Number(baseVersion) !== Number(branch.draft.version)) return res.status(409).json({ error: 'BRANCH_CONFLICT', message: '分支草稿在另一处被修改过', serverDraft: branch.draft })
+    const clean = sanitizeGraph(graph)
+    const draft = { ...clean, version: Number(branch.draft.version) + 1, updatedAt: now() }
+    branch.draft = draft; project.updatedAt = draft.updatedAt
+    // 注意：已发布版本的快照是不可变的，草稿保存绝不能回写线上版本，
+    // 否则读者会读到尚未发布的内容；线上内容只能由“发布新版本”改变。
+    await writeStore(store)
+    res.json({ draft, versions: branch.versions, validation: validateGraph(draft) })
+  })
 })
 
 app.post('/api/projects/:id/branch/publish', async (req, res) => {
   const userId = requireUser(req, res); if (!userId) return
-  const found = await findProject(req, res); if (!found) return
-  const { store, project } = found; const branch = ensureBranch(project)
-  const { baseVersion = 0 } = req.body || {}
-  if (Number(baseVersion) !== Number(branch.draft.version)) return res.status(409).json({ error: 'PUBLISH_CONFLICT', message: '草稿在发布过程中被修改，请刷新后重试', serverVersion: branch.draft.version })
-  const validation = validateGraph(branch.draft)
-  if (validation.errors.length) return res.status(422).json({ error: 'VALIDATION_FAILED', message: '还有未解决的问题，无法发布', validation })
-  for (const v of branch.versions) if (v.status === 'live') v.status = 'superseded'
-  const version = { id: `bv-${crypto.randomUUID()}`, version: branch.versions.reduce((max, v) => Math.max(max, v.version), 0) + 1, status: 'live', snapshot: structuredClone({ startNodeId: branch.draft.startNodeId, nodes: branch.draft.nodes }), sourceDraftVersion: branch.draft.version, publishedAt: now(), retractedAt: null }
-  branch.versions.unshift(version); project.updatedAt = now()
-  await writeStore(store)
-  res.status(201).json({ version, versions: branch.versions, validation })
+  await withMutationLock(async () => {
+    const found = await findProject(req, res); if (!found) return
+    const { store, project } = found; const branch = ensureBranch(project)
+    const { baseVersion = 0 } = req.body || {}
+    if (Number(baseVersion) !== Number(branch.draft.version)) return res.status(409).json({ error: 'PUBLISH_CONFLICT', message: '草稿在发布过程中被修改，请刷新后重试', serverVersion: branch.draft.version })
+    const validation = validateGraph(branch.draft)
+    if (validation.errors.length) return res.status(422).json({ error: 'VALIDATION_FAILED', message: '还有未解决的问题，无法发布', validation })
+    for (const v of branch.versions) if (v.status === 'live') v.status = 'superseded'
+    const version = { id: `bv-${crypto.randomUUID()}`, version: branch.versions.reduce((max, v) => Math.max(max, v.version), 0) + 1, status: 'live', snapshot: structuredClone({ startNodeId: branch.draft.startNodeId, nodes: branch.draft.nodes }), sourceDraftVersion: branch.draft.version, publishedAt: now(), retractedAt: null }
+    branch.versions.unshift(version); project.updatedAt = now()
+    await writeStore(store)
+    res.status(201).json({ version, versions: branch.versions, validation })
+  })
 })
 
 app.post('/api/projects/:id/branch/versions/:vid/retract', async (req, res) => {
   const userId = requireUser(req, res); if (!userId) return
-  const found = await findProject(req, res); if (!found) return
-  const { store, project } = found; const branch = ensureBranch(project)
-  const version = branch.versions.find(v => v.id === req.params.vid)
-  if (!version) return res.status(404).json({ error: 'VERSION_NOT_FOUND', message: '这个版本不存在' })
-  if (version.status !== 'live') return res.status(409).json({ error: 'NOT_LIVE', message: '只有当前线上版本可以撤回' })
-  version.status = 'retracted'; version.retractedAt = now(); project.updatedAt = now()
-  await writeStore(store)
-  res.json({ version, versions: branch.versions })
+  await withMutationLock(async () => {
+    const found = await findProject(req, res); if (!found) return
+    const { store, project } = found; const branch = ensureBranch(project)
+    const version = branch.versions.find(v => v.id === req.params.vid)
+    if (!version) return res.status(404).json({ error: 'VERSION_NOT_FOUND', message: '这个版本不存在' })
+    if (version.status !== 'live') return res.status(409).json({ error: 'NOT_LIVE', message: '只有当前线上版本可以撤回' })
+    version.status = 'retracted'; version.retractedAt = now(); project.updatedAt = now()
+    await writeStore(store)
+    res.json({ version, versions: branch.versions })
+  })
 })
 
 app.get('/api/projects/:id/branch/published', async (req, res) => {
@@ -287,43 +304,39 @@ app.get('/api/projects/:id/branch/published', async (req, res) => {
 
 app.post('/api/projects/:id/branch/sessions', async (req, res) => {
   const userId = requireUser(req, res); if (!userId) return
-  const found = await findProject(req, res); if (!found) return
-  const { store, project } = found; const branch = ensureBranch(project)
-  const { mode = 'preview', versionId } = req.body || {}
-  let graph, pinnedVersionId = null, versionNumber = null, sessionMode = 'preview'
-  if (mode === 'published') {
-    const live = branch.versions.find(v => v.status === 'live')
-    if (!live) return res.status(404).json({ error: 'NO_LIVE_VERSION', message: '还没有已发布的版本，请先发布一版' })
-    graph = live.snapshot; pinnedVersionId = live.id; versionNumber = live.version; sessionMode = 'published'
-  } else if (mode === 'version') {
-    const v = branch.versions.find(v => v.id === versionId)
-    if (!v) return res.status(404).json({ error: 'VERSION_NOT_FOUND', message: '这个版本不存在或已被清理' })
-    graph = v.snapshot; pinnedVersionId = v.id; versionNumber = v.version; sessionMode = 'version'
-  } else {
-    graph = branch.draft
-    if (!graph.nodes?.length) return res.status(422).json({ error: 'EMPTY_GRAPH', message: '草稿还是空的，先添加一个段落吧' })
-  }
-  if (!graph.nodes.some(n => n.id === graph.startNodeId)) return res.status(422).json({ error: 'NO_START', message: '缺少有效的起始段落，无法试玩' })
-  // 把图快照钉进会话：之后无论草稿修改、版本撤回，本次试玩内容都保持稳定
-  const session = { id: `play-${crypto.randomUUID()}`, projectId: project.id, userId, mode: sessionMode, versionId: pinnedVersionId, versionNumber, graph: structuredClone({ startNodeId: graph.startNodeId, nodes: graph.nodes }), currentNodeId: graph.startNodeId, path: [], appliedTokens: [], status: 'playing', endingNodeId: null, createdAt: now(), updatedAt: now() }
-  store.playSessions.push(session)
-  if (store.playSessions.length > 200) store.playSessions = store.playSessions.slice(-200)
-  await writeStore(store)
-  res.status(201).json({ session: sessionView(session) })
+  await withMutationLock(async () => {
+    const found = await findProject(req, res); if (!found) return
+    const { store, project } = found; const branch = ensureBranch(project)
+    const { mode = 'preview', versionId } = req.body || {}
+    let graph, pinnedVersionId = null, versionNumber = null, sessionMode = 'preview'
+    if (mode === 'published') {
+      const live = branch.versions.find(v => v.status === 'live')
+      if (!live) return res.status(404).json({ error: 'NO_LIVE_VERSION', message: '还没有已发布的版本，请先发布一版' })
+      graph = live.snapshot; pinnedVersionId = live.id; versionNumber = live.version; sessionMode = 'published'
+    } else if (mode === 'version') {
+      const v = branch.versions.find(v => v.id === versionId)
+      if (!v) return res.status(404).json({ error: 'VERSION_NOT_FOUND', message: '这个版本不存在或已被清理' })
+      graph = v.snapshot; pinnedVersionId = v.id; versionNumber = v.version; sessionMode = 'version'
+    } else {
+      graph = branch.draft
+      if (!graph.nodes?.length) return res.status(422).json({ error: 'EMPTY_GRAPH', message: '草稿还是空的，先添加一个段落吧' })
+    }
+    if (!graph.nodes.some(n => n.id === graph.startNodeId)) return res.status(422).json({ error: 'NO_START', message: '缺少有效的起始段落，无法试玩' })
+    // 把图快照钉进会话：之后无论草稿修改、版本撤回，本次试玩内容都保持稳定
+    const session = { id: `play-${crypto.randomUUID()}`, projectId: project.id, userId, mode: sessionMode, versionId: pinnedVersionId, versionNumber, graph: structuredClone({ startNodeId: graph.startNodeId, nodes: graph.nodes }), currentNodeId: graph.startNodeId, path: [], appliedTokens: [], status: 'playing', endingNodeId: null, createdAt: now(), updatedAt: now() }
+    store.playSessions.push(session)
+    if (store.playSessions.length > 200) store.playSessions = store.playSessions.slice(-200)
+    await writeStore(store)
+    res.status(201).json({ session: sessionView(session) })
+  })
 })
 
 const findSession = async (req, res) => {
   const store = await readStore()
   const session = store.playSessions.find(s => s.id === req.params.sid && s.projectId === req.params.id && s.userId === req.header('x-user-id'))
   if (!session) { res.status(404).json({ error: 'SESSION_NOT_FOUND', message: '试玩会话不存在或已过期' }); return null }
-  // 读取会话时对齐到作者当前的线上版本（线上版本已撤回则回退到草稿），保证读者读到最新内容
-  const sessionProject = store.projects.find(p => p.id === session.projectId)
-  if (sessionProject && session.mode !== 'preview') {
-    const branch = ensureBranch(sessionProject)
-    const live = branch.versions.find(v => v.status === 'live')
-    const source = live ? live.snapshot : branch.draft
-    session.graph = structuredClone({ startNodeId: source.startNodeId, nodes: source.nodes })
-  }
+  // 会话的图在开局时已钉死（见创建会话处）：这里绝不再对齐作者的草稿或线上版本，
+  // 否则进行中的试玩会被作者后续的修改/发布/撤回中途换掉。
   return { store, session }
 }
 
@@ -335,32 +348,34 @@ app.get('/api/projects/:id/branch/sessions/:sid', async (req, res) => {
 
 app.post('/api/projects/:id/branch/sessions/:sid/choices', async (req, res) => {
   const userId = requireUser(req, res); if (!userId) return
-  const found = await findSession(req, res); if (!found) return
-  const { store, session } = found
-  const { choiceId, token, expectedStep } = req.body || {}
-  if (!token || typeof token !== 'string') return res.status(400).json({ error: 'TOKEN_REQUIRED', message: '缺少提交令牌' })
-  // 幂等：同一 token 重复提交（双击、重试、网络重发）只生效一次
-  if (session.appliedTokens.some(t => t.token === token)) return res.json({ session: sessionView(session), deduplicated: true })
-  if (session.status !== 'playing') return res.status(409).json({ error: 'SESSION_FINISHED', message: '本次试玩已经结束', session: sessionView(session) })
-  if (Number(expectedStep) !== session.path.length) return res.status(409).json({ error: 'STEP_CONFLICT', message: '进度已变化，已为你同步最新状态', session: sessionView(session) })
-  if (session.path.length >= MAX_PLAY_STEPS) {
-    session.status = 'loop-limited'; session.updatedAt = now(); await writeStore(store)
-    return res.status(422).json({ error: 'LOOP_LIMIT', message: `已达到 ${MAX_PLAY_STEPS} 步上限，可能存在循环路径`, session: sessionView(session) })
-  }
-  const index = graphIndex(session.graph)
-  const current = index.get(session.currentNodeId)
-  if (!current) return res.status(500).json({ error: 'NODE_MISSING', message: '当前段落不存在' })
-  const choice = (current.choices || []).find(c => c.id === choiceId)
-  if (!choice) return res.status(400).json({ error: 'ILLEGAL_JUMP', message: '这个选项不属于当前段落，已为你同步', session: sessionView(session) })
-  const target = index.get(choice.targetId)
-  if (!target) return res.status(422).json({ error: 'BROKEN_TARGET', message: '这个选项指向的段落不存在（草稿可能未完善）', session: sessionView(session) })
-  session.path.push({ nodeId: current.id, choiceId: choice.id, choiceLabel: choice.label, targetId: target.id })
-  session.currentNodeId = target.id
-  session.appliedTokens.push({ token, at: now() })
-  if (target.kind === 'ending') { session.status = 'finished'; session.endingNodeId = target.id }
-  session.updatedAt = now()
-  await writeStore(store)
-  res.json({ session: sessionView(session) })
+  await withMutationLock(async () => {
+    const found = await findSession(req, res); if (!found) return
+    const { store, session } = found
+    const { choiceId, token, expectedStep } = req.body || {}
+    if (!token || typeof token !== 'string') return res.status(400).json({ error: 'TOKEN_REQUIRED', message: '缺少提交令牌' })
+    // 幂等：同一 token 重复提交（双击、重试、网络重发）只生效一次
+    if (session.appliedTokens.some(t => t.token === token)) return res.json({ session: sessionView(session), deduplicated: true })
+    if (session.status !== 'playing') return res.status(409).json({ error: 'SESSION_FINISHED', message: '本次试玩已经结束', session: sessionView(session) })
+    if (Number(expectedStep) !== session.path.length) return res.status(409).json({ error: 'STEP_CONFLICT', message: '进度已变化，已为你同步最新状态', session: sessionView(session) })
+    if (session.path.length >= MAX_PLAY_STEPS) {
+      session.status = 'loop-limited'; session.updatedAt = now(); await writeStore(store)
+      return res.status(422).json({ error: 'LOOP_LIMIT', message: `已达到 ${MAX_PLAY_STEPS} 步上限，可能存在循环路径`, session: sessionView(session) })
+    }
+    const index = graphIndex(session.graph)
+    const current = index.get(session.currentNodeId)
+    if (!current) return res.status(500).json({ error: 'NODE_MISSING', message: '当前段落不存在' })
+    const choice = (current.choices || []).find(c => c.id === choiceId)
+    if (!choice) return res.status(400).json({ error: 'ILLEGAL_JUMP', message: '这个选项不属于当前段落，已为你同步', session: sessionView(session) })
+    const target = index.get(choice.targetId)
+    if (!target) return res.status(422).json({ error: 'BROKEN_TARGET', message: '这个选项指向的段落不存在（草稿可能未完善）', session: sessionView(session) })
+    session.path.push({ nodeId: current.id, choiceId: choice.id, choiceLabel: choice.label, targetId: target.id })
+    session.currentNodeId = target.id
+    session.appliedTokens.push({ token, at: now() })
+    if (target.kind === 'ending') { session.status = 'finished'; session.endingNodeId = target.id }
+    session.updatedAt = now()
+    await writeStore(store)
+    res.json({ session: sessionView(session) })
+  })
 })
 
 app.use(express.static(path.join(__dirname, 'dist')))
