@@ -1,0 +1,275 @@
+{
+  "users": [
+    {
+      "id": "user-demo",
+      "name": "林舟",
+      "handle": "linzhou",
+      "initials": "LZ"
+    }
+  ],
+  "projects": [
+    {
+      "id": "proj-salt-wind",
+      "title": "盐与风的航线",
+      "description": "在潮汐尽头，寻找一座不存在的岛。",
+      "visibility": "private",
+      "cover": {
+        "kind": "image",
+        "value": "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=800&q=80",
+        "name": "salt-wind.jpg"
+      },
+      "ownerId": "user-demo",
+      "createdAt": "2026-09-08T09:30:00.000Z",
+      "updatedAt": "2026-09-18T07:08:40.412Z",
+      "draft": {
+        "id": "draft-salt-wind",
+        "content": "潮水退去以后，港口只剩下一种颜色。\n\n我把地图折成四份，塞进旧风衣的内袋。",
+        "version": 7,
+        "updatedAt": "2026-09-16T10:24:00.000Z"
+      },
+      "sharedStatus": "private",
+      "branch": {
+        "draft": {
+          "startNodeId": "bn-harbor",
+          "nodes": [
+            {
+              "id": "bn-harbor",
+              "kind": "passage",
+              "title": "港口清晨",
+              "text": "潮水退去以后，港口只剩下一种颜色。你把地图折成四份，塞进旧风衣的内袋。",
+              "choices": [
+                {
+                  "id": "bc-board",
+                  "label": "登上那艘旧帆船",
+                  "targetId": "bn-ship"
+                },
+                {
+                  "id": "bc-tower",
+                  "label": "先去灯塔打听消息",
+                  "targetId": "bn-lighthouse"
+                }
+              ]
+            },
+            {
+              "id": "bn-ship",
+              "kind": "passage",
+              "title": "离岸的风",
+              "text": "帆绳在掌心勒出红印。海面像一页被反复涂改的稿纸。",
+              "choices": [
+                {
+                  "id": "bc-storm",
+                  "label": "迎着风暴直行",
+                  "targetId": "bn-storm"
+                },
+                {
+                  "id": "bc-along",
+                  "label": "沿着灯标慢慢绕行",
+                  "targetId": "bn-lighthouse"
+                },
+                {
+                  "id": "bc-circle",
+                  "label": "犹豫着在海上兜圈",
+                  "targetId": "bn-ship"
+                }
+              ]
+            },
+            {
+              "id": "bn-storm",
+              "kind": "passage",
+              "title": "风暴眼",
+              "text": "浪比桅杆更高。你听见船骨在深处呻吟。",
+              "choices": [
+                {
+                  "id": "bc-crash",
+                  "label": "收帆硬闯过去",
+                  "targetId": "bn-wreck"
+                },
+                {
+                  "id": "bc-back",
+                  "label": "掉头退回风小的海域",
+                  "targetId": "bn-ship"
+                }
+              ]
+            },
+            {
+              "id": "bn-lighthouse",
+              "kind": "passage",
+              "title": "灯塔守夜人",
+              "text": "守夜人递给你一杯烫手的茶：「灯亮着，岛就在；灯灭了，岛就躲起来。」",
+              "choices": [
+                {
+                  "id": "bc-light",
+                  "label": "点亮信号灯",
+                  "targetId": "bn-island"
+                },
+                {
+                  "id": "bc-dark",
+                  "label": "让灯保持熄灭",
+                  "targetId": "bn-storm"
+                }
+              ]
+            },
+            {
+              "id": "bn-island",
+              "kind": "ending",
+              "title": "不存在的岛",
+              "text": "灯亮的那一刻，海平线上浮起一座岛的轮廓。地图上没有它，但你的风衣口袋里有。",
+              "choices": []
+            },
+            {
+              "id": "bn-wreck",
+              "kind": "ending",
+              "title": "沉睡的船骸",
+              "text": "船在黎明前安静下来。许多年后，潜水的人会在船舱里找到半张被盐水泡软的地图。",
+              "choices": []
+            },
+            {
+              "id": "bn-bottle",
+              "kind": "ending",
+              "title": "漂流瓶",
+              "text": "没有人读到过这封信。它只是一直漂，一直漂。",
+              "choices": []
+            }
+          ],
+          "version": 0,
+          "updatedAt": "2026-09-18T07:08:40.386Z"
+        },
+        "versions": [
+          {
+            "id": "bv-1ca01310-6977-444a-9b93-b8326613ed19",
+            "version": 1,
+            "status": "live",
+            "snapshot": {
+              "startNodeId": "bn-harbor",
+              "nodes": [
+                {
+                  "id": "bn-harbor",
+                  "kind": "passage",
+                  "title": "港口清晨",
+                  "text": "潮水退去以后，港口只剩下一种颜色。你把地图折成四份，塞进旧风衣的内袋。",
+                  "choices": [
+                    {
+                      "id": "bc-board",
+                      "label": "登上那艘旧帆船",
+                      "targetId": "bn-ship"
+                    },
+                    {
+                      "id": "bc-tower",
+                      "label": "先去灯塔打听消息",
+                      "targetId": "bn-lighthouse"
+                    }
+                  ]
+                },
+                {
+                  "id": "bn-ship",
+                  "kind": "passage",
+                  "title": "离岸的风",
+                  "text": "帆绳在掌心勒出红印。海面像一页被反复涂改的稿纸。",
+                  "choices": [
+                    {
+                      "id": "bc-storm",
+                      "label": "迎着风暴直行",
+                      "targetId": "bn-storm"
+                    },
+                    {
+                      "id": "bc-along",
+                      "label": "沿着灯标慢慢绕行",
+                      "targetId": "bn-lighthouse"
+                    },
+                    {
+                      "id": "bc-circle",
+                      "label": "犹豫着在海上兜圈",
+                      "targetId": "bn-ship"
+                    }
+                  ]
+                },
+                {
+                  "id": "bn-storm",
+                  "kind": "passage",
+                  "title": "风暴眼",
+                  "text": "浪比桅杆更高。你听见船骨在深处呻吟。",
+                  "choices": [
+                    {
+                      "id": "bc-crash",
+                      "label": "收帆硬闯过去",
+                      "targetId": "bn-wreck"
+                    },
+                    {
+                      "id": "bc-back",
+                      "label": "掉头退回风小的海域",
+                      "targetId": "bn-ship"
+                    }
+                  ]
+                },
+                {
+                  "id": "bn-lighthouse",
+                  "kind": "passage",
+                  "title": "灯塔守夜人",
+                  "text": "守夜人递给你一杯烫手的茶：「灯亮着，岛就在；灯灭了，岛就躲起来。」",
+                  "choices": [
+                    {
+                      "id": "bc-light",
+                      "label": "点亮信号灯",
+                      "targetId": "bn-island"
+                    },
+                    {
+                      "id": "bc-dark",
+                      "label": "让灯保持熄灭",
+                      "targetId": "bn-storm"
+                    }
+                  ]
+                },
+                {
+                  "id": "bn-island",
+                  "kind": "ending",
+                  "title": "不存在的岛",
+                  "text": "灯亮的那一刻，海平线上浮起一座岛的轮廓。地图上没有它，但你的风衣口袋里有。",
+                  "choices": []
+                },
+                {
+                  "id": "bn-wreck",
+                  "kind": "ending",
+                  "title": "沉睡的船骸",
+                  "text": "船在黎明前安静下来。许多年后，潜水的人会在船舱里找到半张被盐水泡软的地图。",
+                  "choices": []
+                },
+                {
+                  "id": "bn-bottle",
+                  "kind": "ending",
+                  "title": "漂流瓶",
+                  "text": "没有人读到过这封信。它只是一直漂，一直漂。",
+                  "choices": []
+                }
+              ]
+            },
+            "sourceDraftVersion": 0,
+            "publishedAt": "2026-09-18T07:08:40.412Z",
+            "retractedAt": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "proj-lanterns",
+      "title": "午夜图书馆",
+      "description": "每一本被遗忘的书，都在午夜后亮起一盏灯。",
+      "visibility": "shared",
+      "cover": {
+        "kind": "image",
+        "value": "https://images.unsplash.com/photo-1521587760476-6c12a4b040da?auto=format&fit=crop&w=800&q=80",
+        "name": "library.jpg"
+      },
+      "ownerId": "user-demo",
+      "createdAt": "2026-08-22T12:10:00.000Z",
+      "updatedAt": "2026-09-12T16:40:00.000Z",
+      "draft": {
+        "id": "draft-lanterns",
+        "content": "图书馆在午夜十二点准时醒来。",
+        "version": 3,
+        "updatedAt": "2026-09-12T16:40:00.000Z"
+      },
+      "sharedStatus": "shared"
+    }
+  ],
+  "playSessions": []
+}
