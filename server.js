@@ -36,6 +36,10 @@ async function readStore() {
 }
 let writeQueue = Promise.resolve()
 async function writeStore(store) { writeQueue = writeQueue.then(async () => { await fs.mkdir(dataDir, { recursive: true }); await fs.writeFile(dataFile, JSON.stringify(store, null, 2)) }); return writeQueue }
+// 串行化「读—校验—改—写」整个事务：多个标签页同时保存时，后一个请求必须等前一个落盘后再读，
+// 否则双方都会基于同一个旧版本号通过校验、各写一版，后写的把先写的改动无声覆盖
+let storeMutex = Promise.resolve()
+function withLock(task) { const run = storeMutex.then(() => task()); storeMutex = run.then(() => {}, () => {}); return run }
 function requireUser(req, res) { const id = req.header('x-user-id') || req.query.userId; if (!id) { res.status(401).json({ error: 'UNAUTHENTICATED', message: '请先登录 Novelverse' }); return null } return id }
 function now() { return new Date().toISOString() }
 
@@ -201,7 +205,7 @@ function sessionView(session) {
 
 app.get('/api/me', (req, res) => res.json({ user: demoUser }))
 app.get('/api/projects', async (req, res) => { const userId = requireUser(req, res); if (!userId) return; const store = await readStore(); res.json({ projects: store.projects.filter(p => p.ownerId === userId) }) })
-app.post('/api/projects', async (req, res) => {
+app.post('/api/projects', async (req, res) => withLock(async () => {
   const userId = requireUser(req, res); if (!userId) return
   const { title, description = '', visibility = 'private', cover = null } = req.body || {}
   const cleanTitle = String(title || '').trim(); if (!cleanTitle) return res.status(400).json({ error: 'TITLE_REQUIRED', message: '请填写项目标题' })
@@ -209,31 +213,31 @@ app.post('/api/projects', async (req, res) => {
   const projectId = `proj-${crypto.randomUUID()}`; const draftId = `draft-${crypto.randomUUID()}`; const timestamp = now()
   const project = { id: projectId, title: cleanTitle, description: String(description).trim(), visibility: visibility === 'shared' ? 'shared' : 'private', cover, ownerId: userId, createdAt: timestamp, updatedAt: timestamp, draft: { id: draftId, content: '', version: 0, updatedAt: timestamp }, sharedStatus: visibility === 'shared' ? 'shared' : 'private' }
   store.projects.unshift(project); await writeStore(store); res.status(201).json({ project })
-})
-app.patch('/api/projects/:id', async (req, res) => {
+}))
+app.patch('/api/projects/:id', async (req, res) => withLock(async () => {
   const userId = requireUser(req, res); if (!userId) return; const store = await readStore(); const project = store.projects.find(p => p.id === req.params.id && p.ownerId === userId); if (!project) return res.status(404).json({ error: 'NOT_FOUND', message: '项目不存在' })
   const { title, description, visibility, cover } = req.body || {}; if (title !== undefined) project.title = String(title).trim(); if (description !== undefined) project.description = String(description).trim(); if (visibility !== undefined) project.visibility = visibility === 'shared' ? 'shared' : 'private'; if (cover !== undefined) project.cover = cover; project.updatedAt = now(); project.sharedStatus = project.visibility; await writeStore(store); res.json({ project })
-})
+}))
 app.get('/api/projects/:id/draft', async (req, res) => { const userId = requireUser(req, res); if (!userId) return; const store = await readStore(); const project = store.projects.find(p => p.id === req.params.id && p.ownerId === userId); if (!project) return res.status(404).json({ error: 'NOT_FOUND', message: '草稿不存在' }); res.json({ draft: project.draft }) })
-app.put('/api/projects/:id/draft', async (req, res) => {
+app.put('/api/projects/:id/draft', async (req, res) => withLock(async () => {
   const userId = requireUser(req, res); if (!userId) return; const store = await readStore(); const project = store.projects.find(p => p.id === req.params.id && p.ownerId === userId); if (!project) return res.status(404).json({ error: 'NOT_FOUND', message: '项目不存在' })
   const { content = '', baseVersion = 0 } = req.body || {}; if (Number(baseVersion) !== Number(project.draft.version)) return res.status(409).json({ error: 'DRAFT_CONFLICT', message: '这份草稿在另一台设备上有更新', serverDraft: project.draft })
   const draft = { ...project.draft, content: String(content), version: Number(project.draft.version) + 1, updatedAt: now() }; project.draft = draft; project.updatedAt = draft.updatedAt; await writeStore(store); res.json({ draft })
-})
-app.post('/api/projects/:id/share', async (req, res) => { const userId = requireUser(req, res); if (!userId) return; const store = await readStore(); const project = store.projects.find(p => p.id === req.params.id && p.ownerId === userId); if (!project) return res.status(404).json({ error: 'NOT_FOUND', message: '项目不存在' }); project.visibility = project.visibility === 'shared' ? 'private' : 'shared'; project.sharedStatus = project.visibility; project.updatedAt = now(); await writeStore(store); res.json({ project }) })
+}))
+app.post('/api/projects/:id/share', async (req, res) => withLock(async () => { const userId = requireUser(req, res); if (!userId) return; const store = await readStore(); const project = store.projects.find(p => p.id === req.params.id && p.ownerId === userId); if (!project) return res.status(404).json({ error: 'NOT_FOUND', message: '项目不存在' }); project.visibility = project.visibility === 'shared' ? 'private' : 'shared'; project.sharedStatus = project.visibility; project.updatedAt = now(); await writeStore(store); res.json({ project }) }))
 
 // ---------- 分支叙事 API ----------
 const findProject = async (req, res) => { const store = await readStore(); const project = store.projects.find(p => p.id === req.params.id && p.ownerId === req.header('x-user-id')); if (!project) { res.status(404).json({ error: 'NOT_FOUND', message: '项目不存在' }); return null } return { store, project } }
 
-app.get('/api/projects/:id/branch', async (req, res) => {
+app.get('/api/projects/:id/branch', async (req, res) => withLock(async () => {
   const userId = requireUser(req, res); if (!userId) return
   const found = await findProject(req, res); if (!found) return
   const { store, project } = found; const branch = ensureBranch(project)
   await writeStore(store) // 持久化惰性初始化的草稿，保证节点 id 稳定
   res.json({ draft: branch.draft, versions: branch.versions, validation: validateGraph(branch.draft) })
-})
+}))
 
-app.put('/api/projects/:id/branch', async (req, res) => {
+app.put('/api/projects/:id/branch', async (req, res) => withLock(async () => {
   const userId = requireUser(req, res); if (!userId) return
   const found = await findProject(req, res); if (!found) return
   const { store, project } = found; const branch = ensureBranch(project)
@@ -242,14 +246,12 @@ app.put('/api/projects/:id/branch', async (req, res) => {
   const clean = sanitizeGraph(graph)
   const draft = { ...clean, version: Number(branch.draft.version) + 1, updatedAt: now() }
   branch.draft = draft; project.updatedAt = draft.updatedAt
-  // 保存草稿时把线上版本同步到最新内容，避免读者读到过期版本
-  const liveVersion = branch.versions.find(v => v.status === 'live')
-  if (liveVersion) liveVersion.snapshot = structuredClone({ startNodeId: draft.startNodeId, nodes: draft.nodes })
+  // 草稿只是草稿：绝不同步到线上版本。读者读到的内容只能由「发布」动作产生快照
   await writeStore(store)
   res.json({ draft, versions: branch.versions, validation: validateGraph(draft) })
-})
+}))
 
-app.post('/api/projects/:id/branch/publish', async (req, res) => {
+app.post('/api/projects/:id/branch/publish', async (req, res) => withLock(async () => {
   const userId = requireUser(req, res); if (!userId) return
   const found = await findProject(req, res); if (!found) return
   const { store, project } = found; const branch = ensureBranch(project)
@@ -262,9 +264,9 @@ app.post('/api/projects/:id/branch/publish', async (req, res) => {
   branch.versions.unshift(version); project.updatedAt = now()
   await writeStore(store)
   res.status(201).json({ version, versions: branch.versions, validation })
-})
+}))
 
-app.post('/api/projects/:id/branch/versions/:vid/retract', async (req, res) => {
+app.post('/api/projects/:id/branch/versions/:vid/retract', async (req, res) => withLock(async () => {
   const userId = requireUser(req, res); if (!userId) return
   const found = await findProject(req, res); if (!found) return
   const { store, project } = found; const branch = ensureBranch(project)
@@ -274,7 +276,7 @@ app.post('/api/projects/:id/branch/versions/:vid/retract', async (req, res) => {
   version.status = 'retracted'; version.retractedAt = now(); project.updatedAt = now()
   await writeStore(store)
   res.json({ version, versions: branch.versions })
-})
+}))
 
 app.get('/api/projects/:id/branch/published', async (req, res) => {
   const userId = requireUser(req, res); if (!userId) return
@@ -285,7 +287,7 @@ app.get('/api/projects/:id/branch/published', async (req, res) => {
   res.json({ version: { id: live.id, version: live.version, publishedAt: live.publishedAt }, graph: live.snapshot })
 })
 
-app.post('/api/projects/:id/branch/sessions', async (req, res) => {
+app.post('/api/projects/:id/branch/sessions', async (req, res) => withLock(async () => {
   const userId = requireUser(req, res); if (!userId) return
   const found = await findProject(req, res); if (!found) return
   const { store, project } = found; const branch = ensureBranch(project)
@@ -304,26 +306,21 @@ app.post('/api/projects/:id/branch/sessions', async (req, res) => {
     if (!graph.nodes?.length) return res.status(422).json({ error: 'EMPTY_GRAPH', message: '草稿还是空的，先添加一个段落吧' })
   }
   if (!graph.nodes.some(n => n.id === graph.startNodeId)) return res.status(422).json({ error: 'NO_START', message: '缺少有效的起始段落，无法试玩' })
-  // 把图快照钉进会话：之后无论草稿修改、版本撤回，本次试玩内容都保持稳定
+  // 把图快照钉进会话：之后无论草稿修改、发布新版还是版本撤回，本次试玩内容都保持稳定
   const session = { id: `play-${crypto.randomUUID()}`, projectId: project.id, userId, mode: sessionMode, versionId: pinnedVersionId, versionNumber, graph: structuredClone({ startNodeId: graph.startNodeId, nodes: graph.nodes }), currentNodeId: graph.startNodeId, path: [], appliedTokens: [], status: 'playing', endingNodeId: null, createdAt: now(), updatedAt: now() }
   store.playSessions.push(session)
   if (store.playSessions.length > 200) store.playSessions = store.playSessions.slice(-200)
   await writeStore(store)
   res.status(201).json({ session: sessionView(session) })
-})
+}))
 
 const findSession = async (req, res) => {
   const store = await readStore()
   const session = store.playSessions.find(s => s.id === req.params.sid && s.projectId === req.params.id && s.userId === req.header('x-user-id'))
   if (!session) { res.status(404).json({ error: 'SESSION_NOT_FOUND', message: '试玩会话不存在或已过期' }); return null }
-  // 读取会话时对齐到作者当前的线上版本（线上版本已撤回则回退到草稿），保证读者读到最新内容
-  const sessionProject = store.projects.find(p => p.id === session.projectId)
-  if (sessionProject && session.mode !== 'preview') {
-    const branch = ensureBranch(sessionProject)
-    const live = branch.versions.find(v => v.status === 'live')
-    const source = live ? live.snapshot : branch.draft
-    session.graph = structuredClone({ startNodeId: source.startNodeId, nodes: source.nodes })
-  }
+  // 会话创建时已把整份图快照钉在 session.graph 上：只读它，绝不再对齐草稿或当前线上版本。
+  // 这样作者之后改草稿、发新版、撤回线上版本，都不会影响进行中的这一局；
+  // 撤回后旧快照仍随会话保留，已开始的读者可以照原版本读完。
   return { store, session }
 }
 
@@ -333,7 +330,7 @@ app.get('/api/projects/:id/branch/sessions/:sid', async (req, res) => {
   res.json({ session: sessionView(found.session) })
 })
 
-app.post('/api/projects/:id/branch/sessions/:sid/choices', async (req, res) => {
+app.post('/api/projects/:id/branch/sessions/:sid/choices', async (req, res) => withLock(async () => {
   const userId = requireUser(req, res); if (!userId) return
   const found = await findSession(req, res); if (!found) return
   const { store, session } = found
@@ -361,7 +358,7 @@ app.post('/api/projects/:id/branch/sessions/:sid/choices', async (req, res) => {
   session.updatedAt = now()
   await writeStore(store)
   res.json({ session: sessionView(session) })
-})
+}))
 
 app.use(express.static(path.join(__dirname, 'dist')))
 app.get(/.*/, (req, res, next) => req.path.startsWith('/api/') ? next() : res.sendFile(path.join(__dirname, 'dist', 'index.html')))
